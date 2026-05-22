@@ -31,6 +31,7 @@ BASE_URL           = "https://www.developeracademy.unina.it"
 STATE_FILE         = os.path.join(os.path.dirname(__file__), "monitor_unina_state.json")
 
 NOME_DA_CERCARE    = "Stefano Annunziata"
+ANNO_NASCITA       = "2006"
 # ───────────────────────────────────────────────────────────────────────────────
 
 
@@ -114,25 +115,32 @@ def search_in_pdf(pdf_url: str, name: str) -> dict:
     parts = name.strip().split()
     name_reversed = (parts[-1] + " " + " ".join(parts[:-1])).lower() if len(parts) >= 2 else name_lower
 
+    match_exact = None   # riga con nome + anno di nascita
+    match_name  = None   # riga con solo il nome (fallback)
+
     for line in lines:
         line_lower = line.lower()
         if name_lower in line_lower or name_reversed in line_lower:
-            print(f"  [PDF] Riga trovata: {line.strip()}")
-            result["found"] = True
-            result["row"] = line.strip()
-            result["admitted"] = "admitted" in line_lower
+            if ANNO_NASCITA in line:
+                match_exact = line   # corrispondenza perfetta: nome + anno
+                break
+            elif match_name is None:
+                match_name = line    # salva come fallback
 
-            # Estrai score (numero intero, anche con * o ,)
-            score_match = re.search(r'\b(\d+[\*,\.]?\d*)\b', line)
-            if score_match:
-                result["score"] = score_match.group(1)
+    chosen = match_exact or match_name
+    if chosen:
+        print(f"  [PDF] Riga trovata: {chosen.strip()}")
+        result["found"] = True
+        result["row"] = chosen.strip()
+        result["admitted"] = "admitted" in chosen.lower()
 
-            # Estrai posizione (primo numero della riga)
-            pos_match = re.match(r'^\s*(\d+)\s', line)
-            if pos_match:
-                result["position"] = pos_match.group(1)
+        score_match = re.search(r'\b(\d+[\*,\.]?\d*)\b', chosen)
+        if score_match:
+            result["score"] = score_match.group(1)
 
-            break
+        pos_match = re.match(r'^\s*(\d+)\s', chosen)
+        if pos_match:
+            result["position"] = pos_match.group(1)
 
     return result
 
