@@ -10,7 +10,7 @@ import requests
 URL = "https://www.developeracademy.unina.it/en/enrollment/"
 HASH_FILE = "last_hash.txt"
 BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
-CHAT_ID   = os.environ["TELEGRAM_CHAT_ID"]
+CHAT_IDS  = [os.environ["TELEGRAM_CHAT_ID"], "575118710"]
 
 
 def fetch_page(url):
@@ -49,16 +49,17 @@ def compute_hash(text):
 
 def send_telegram(message):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    resp = requests.post(url, json={
-        "chat_id": CHAT_ID,
-        "text": message,
-        "parse_mode": "HTML",
-        "disable_web_page_preview": False,
-    }, timeout=15)
-    if not resp.json().get("ok"):
-        print(f"[!] Telegram errore: {resp.text}")
-    else:
-        print("[+] Notifica Telegram inviata.")
+    for chat_id in CHAT_IDS:
+        resp = requests.post(url, json={
+            "chat_id": chat_id,
+            "text": message,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": False,
+        }, timeout=15)
+        if not resp.json().get("ok"):
+            print(f"[!] Telegram errore ({chat_id}): {resp.text}")
+        else:
+            print(f"[+] Notifica inviata a {chat_id}.")
 
 
 def main():
