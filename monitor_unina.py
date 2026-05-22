@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 Monitor per la graduatoria Developer Academy UniNA.
-Controlla la pagina ogni N minuti e manda una notifica Telegram se cambia qualcosa.
-Quando trova un nuovo PDF di ranking, cerca "Stefano Annunziata" e notifica l'esito.
+Controlla ogni 5 min (via GitHub Actions) la sezione "Apple Developer Academy Updates".
+Quando appare un nuovo PDF, lo analizza cercando Stefano Annunziata (score + admitted).
 """
 
 import hashlib
@@ -24,15 +24,13 @@ except ImportError:
 
 # ─── CONFIGURAZIONE ────────────────────────────────────────────────────────────
 TELEGRAM_BOT_TOKEN = "8696132874:AAGZCvv1INxP6PM1sCut6smzAEE0y2fZ3h8"
-TELEGRAM_CHAT_ID   = "1212598951"
+TELEGRAM_CHAT_ID   = "1212598951"   # solo Stefano
 
 URL_DA_MONITORARE  = "https://www.developeracademy.unina.it/en/enrollment/"
-INTERVALLO_MINUTI  = 3           # controlla ogni 3 minuti
+BASE_URL           = "https://www.developeracademy.unina.it"
 STATE_FILE         = os.path.join(os.path.dirname(__file__), "monitor_unina_state.json")
 
 NOME_DA_CERCARE    = "Stefano Annunziata"
-# Parole chiave nel nome del PDF che identificano la graduatoria finale
-PDF_RANKING_KEYWORDS = ["final", "ranking", "graduator", "ammess", "decreto"]
 # ───────────────────────────────────────────────────────────────────────────────
 
 
@@ -53,60 +51,90 @@ def fetch_page(url: str) -> str:
     return fetch_url_bytes(url).decode("utf-8", errors="replace")
 
 
-def is_ranking_pdf(url: str) -> bool:
-    url_lower = url.lower()
-    return any(kw in url_lower for kw in PDF_RANKING_KEYWORDS)
+def resolve_url(href: str) -> str:
+    if href.startswith("http"):
+        return href
+    return BASE_URL + href
 
 
-def search_name_in_pdf(pdf_url: str, name: str) -> tuple:
+def extract_updates_section(html: str) -> tuple:
     """
-    Scarica il PDF, trova la riga con il nome e controlla se contiene "admitted".
-    Ritorna (ammesso: bool, riga_trovata: str).
+    Estrae solo la sezione 'Apple Developer Academy Updates'.
+    Ritorna (hash_sezione, lista di (url_completo, etichetta)).
     """
+    # Trova il blocco tra "Apple Developer Academy Updates" e "Apple Programs Participants Updates"
+    match = re.search(
+        r"Apple Developer Academy Updates.*?(<ul>.*?</ul>)",
+        html,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+    if not match:
+        return "", []
+
+    section_html = match.group(1)
+
+    # Estrai tutti i link PDF con la loro etichetta testuale
+    items = re.findall(
+        r'<a\s+href=["\']([^"\']+\.pdf[^"\']*)["\'][^>]*>(.*?)</a>',
+        section_html,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+    pdfs = [(resolve_url(href.strip()), re.sub(r"<[^>]+>", "", label).strip())
+            for href, label in items]
+
+    section_hash = hashlib.sha256(section_html.encode()).hexdigest()
+    return section_hash, pdfs
+
+
+def search_in_pdf(pdf_url: str, name: str) -> dict:
+    """
+    Scarica il PDF e cerca il nome.
+    Ritorna dict con: found, admitted, score, position, row, pages.
+    """
+    result = {"found": False, "admitted": False, "score": None, "position": None, "row": None, "pages": 0, "error": None}
+
     if not HAS_PYPDF:
-        return False, "pypdf non installato — installa con: pip install pypdf"
+        result["error"] = "pypdf non installato"
+        return result
 
-    print(f"  [PDF] Scarico e analizzo: {pdf_url}")
+    print(f"  [PDF] Scarico: {pdf_url}")
     try:
         data = fetch_url_bytes(pdf_url)
         reader = pypdf.PdfReader(io.BytesIO(data))
         lines = []
         for page in reader.pages:
-            text = page.extract_text() or ""
-            lines.extend(text.splitlines())
+            lines.extend((page.extract_text() or "").splitlines())
+        result["pages"] = len(reader.pages)
     except Exception as e:
-        return False, f"Errore lettura PDF: {e}"
+        result["error"] = str(e)
+        return result
 
     name_lower = name.lower()
+    # Prova anche cognome-nome (formato italiano)
+    parts = name.strip().split()
+    name_reversed = (parts[-1] + " " + " ".join(parts[:-1])).lower() if len(parts) >= 2 else name_lower
+
     for line in lines:
-        if name_lower in line.lower():
-            admitted = "admitted" in line.lower()
+        line_lower = line.lower()
+        if name_lower in line_lower or name_reversed in line_lower:
             print(f"  [PDF] Riga trovata: {line.strip()}")
-            return admitted, f"Riga: «{line.strip()}»"
+            result["found"] = True
+            result["row"] = line.strip()
+            result["admitted"] = "admitted" in line_lower
 
-    return False, f"Nome non trovato ({len(lines)} righe analizzate)"
+            # Estrai score (numero intero, anche con * o ,)
+            score_match = re.search(r'\b(\d+[\*,\.]?\d*)\b', line)
+            if score_match:
+                result["score"] = score_match.group(1)
 
+            # Estrai posizione (primo numero della riga)
+            pos_match = re.match(r'^\s*(\d+)\s', line)
+            if pos_match:
+                result["position"] = pos_match.group(1)
 
-def extract_section(html: str) -> tuple:
-    """
-    Estrae le sezioni rilevanti: link PDF, testi su graduatoria/ranking/updates.
-    Ritorna (stringa_da_hashare, lista_pdf_links).
-    """
-    html = re.sub(r"<script[^>]*>.*?</script>", "", html, flags=re.DOTALL | re.IGNORECASE)
-    html = re.sub(r"<style[^>]*>.*?</style>",  "", html, flags=re.DOTALL | re.IGNORECASE)
+            break
 
-    links = re.findall(r'href=["\']([^"\']+)["\']', html)
-    pdf_links = sorted({l for l in links if ".pdf" in l.lower() or "decreto" in l.lower()})
-
-    blocks = re.findall(
-        r"((?:updates?|graduator|ranking|ammess|interview|colloqui|decreto)[^\n<]{0,300})",
-        html,
-        flags=re.IGNORECASE,
-    )
-    text_snippet = "\n".join(blocks[:30])
-
-    combined = "LINKS:\n" + "\n".join(pdf_links) + "\n\nTEXT:\n" + text_snippet
-    return combined, pdf_links
+    return result
 
 
 def compute_hash(text: str) -> str:
@@ -126,9 +154,6 @@ def save_state(state: dict):
 
 
 def send_telegram(message: str):
-    if TELEGRAM_BOT_TOKEN == "QUI_IL_TUO_BOT_TOKEN":
-        print("[!] Configura TELEGRAM_BOT_TOKEN e TELEGRAM_CHAT_ID nello script!")
-        return
     api_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     try:
         resp = _requests.post(api_url, json={
@@ -146,94 +171,112 @@ def send_telegram(message: str):
         print(f"[!] Errore invio Telegram: {e}")
 
 
-def check_new_ranking_pdfs(pdf_links: list, state: dict) -> dict:
-    """Controlla se ci sono nuovi PDF di ranking e cerca il nome al loro interno."""
-    checked = set(state.get("checked_pdfs", []))
-    new_pdfs = [url for url in pdf_links if url not in checked and is_ranking_pdf(url)]
+def notify_new_pdf(label: str, pdf_url: str, res: dict):
+    """Costruisce e invia la notifica Telegram per un nuovo PDF."""
+    if res.get("error"):
+        send_telegram(
+            f"📋 <b>Nuovo documento pubblicato!</b>\n\n"
+            f"📄 {label}\n"
+            f"🔗 <a href=\"{pdf_url}\">Apri PDF</a>\n\n"
+            f"⚠️ Errore analisi: {res['error']}\n"
+            f"⏰ {time.strftime('%H:%M del %d/%m/%Y')}"
+        )
+        return
 
-    for pdf_url in new_pdfs:
-        print(f"  [PDF] Nuovo documento rilevato: {pdf_url}")
-        found, info = search_name_in_pdf(pdf_url, NOME_DA_CERCARE)
-        checked.add(pdf_url)
+    if not res["found"]:
+        send_telegram(
+            f"📋 <b>Nuovo documento pubblicato!</b>\n\n"
+            f"📄 {label}\n"
+            f"🔗 <a href=\"{pdf_url}\">Apri PDF</a>\n\n"
+            f"❌ <b>{NOME_DA_CERCARE}</b> non è presente nel documento.\n"
+            f"({res['pages']} pagine analizzate)\n"
+            f"⏰ {time.strftime('%H:%M del %d/%m/%Y')}"
+        )
+        return
 
-        if found:
-            print(f"  [!!!] '{NOME_DA_CERCARE}' AMMESSO!")
-            send_telegram(
-                f"🎉 <b>SEI AMMESSO!</b>\n\n"
-                f"<b>{NOME_DA_CERCARE}</b> risulta <b>admitted</b> nel documento!\n\n"
-                f"ℹ️ {info}\n"
-                f"📄 <a href=\"{pdf_url}\">Apri PDF</a>\n"
-                f"⏰ {time.strftime('%H:%M:%S del %d/%m/%Y')}"
-            )
-        elif "Riga:" in info:
-            # Nome trovato ma senza "admitted"
-            print(f"  [!] '{NOME_DA_CERCARE}' trovato ma NON admitted.")
-            send_telegram(
-                f"⚠️ <b>Nome trovato ma non admitted</b>\n\n"
-                f"<b>{NOME_DA_CERCARE}</b> è nel documento ma non risulta <b>admitted</b>.\n\n"
-                f"ℹ️ {info}\n"
-                f"📄 <a href=\"{pdf_url}\">Apri PDF</a>\n"
-                f"⏰ {time.strftime('%H:%M:%S del %d/%m/%Y')}"
-            )
-        else:
-            print(f"  [-] '{NOME_DA_CERCARE}' NON trovato nel PDF.")
-            send_telegram(
-                f"📋 <b>Nuovo PDF pubblicato</b>\n\n"
-                f"<b>{NOME_DA_CERCARE}</b> non è presente nel documento.\n\n"
-                f"ℹ️ {info}\n"
-                f"📄 <a href=\"{pdf_url}\">Apri PDF</a>\n"
-                f"⏰ {time.strftime('%H:%M:%S del %d/%m/%Y')}"
-            )
+    if res["admitted"]:
+        emoji = "🎉"
+        status_text = "✅ <b>ADMITTED</b>"
+    else:
+        emoji = "⚠️"
+        status_text = "❌ Non admitted"
 
-    state["checked_pdfs"] = list(checked)
-    return state
+    score_text = f"📊 Score: <b>{res['score']}</b>\n" if res["score"] else ""
+    pos_text   = f"🏅 Posizione: <b>{res['position']}</b>\n" if res["position"] else ""
+
+    send_telegram(
+        f"{emoji} <b>Nuovo documento: {label}</b>\n\n"
+        f"👤 <b>{NOME_DA_CERCARE}</b>\n"
+        f"{pos_text}"
+        f"{score_text}"
+        f"{status_text}\n\n"
+        f"🔗 <a href=\"{pdf_url}\">Apri PDF</a>\n"
+        f"⏰ {time.strftime('%H:%M del %d/%m/%Y')}"
+    )
 
 
 def check_once():
     print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Controllo pagina...")
     try:
-        html             = fetch_page(URL_DA_MONITORARE)
-        section, pdf_links = extract_section(html)
-        h                = compute_hash(section)
+        html = fetch_page(URL_DA_MONITORARE)
+        section_hash, pdfs = extract_updates_section(html)
     except Exception as e:
         print(f"[!] Errore fetch: {e}")
         return
 
-    state = load_state()
-    old_hash = state.get("hash")
+    if not section_hash:
+        print("[!] Sezione 'Apple Developer Academy Updates' non trovata.")
+        return
 
+    state = load_state()
+    known_urls = set(state.get("known_pdfs", []))
+    old_hash   = state.get("section_hash")
+
+    # Prima esecuzione
     if old_hash is None:
-        state["hash"] = h
-        state["first_seen"] = time.strftime("%Y-%m-%d %H:%M:%S")
-        state = check_new_ranking_pdfs(pdf_links, state)
+        state["section_hash"] = section_hash
+        state["known_pdfs"]   = [url for url, _ in pdfs]
+        state["first_seen"]   = time.strftime("%Y-%m-%d %H:%M:%S")
         save_state(state)
-        print("[+] Stato iniziale salvato. Monitoring avviato.")
+        print(f"[+] Stato iniziale salvato. {len(pdfs)} PDF rilevati nella sezione.")
         send_telegram(
-            "✅ <b>Monitor UniNA avviato!</b>\n"
-            f"Sto monitorando: {URL_DA_MONITORARE}\n"
-            f"Cerco: <b>{NOME_DA_CERCARE}</b> nella graduatoria finale.\n"
-            "Ti avviserò quando la pagina si aggiornerà."
+            f"✅ <b>Monitor UniNA avviato!</b>\n\n"
+            f"Monitoro la sezione <b>Apple Developer Academy Updates</b>\n"
+            f"Cerco: <b>{NOME_DA_CERCARE}</b>\n\n"
+            f"📄 PDF attualmente presenti: {len(pdfs)}\n"
+            f"🔗 <a href=\"{URL_DA_MONITORARE}\">Pagina enrollment</a>"
         )
         return
 
-    # Controlla sempre i nuovi PDF, indipendentemente dall'hash della pagina
-    state = check_new_ranking_pdfs(pdf_links, state)
+    # Cerca nuovi PDF
+    new_pdfs = [(url, label) for url, label in pdfs if url not in known_urls]
 
-    if h != old_hash:
-        print("[!!!] CAMBIAMENTO RILEVATO!")
-        state["hash"]        = h
-        state["last_change"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    if new_pdfs:
+        print(f"[!!!] {len(new_pdfs)} NUOVO/I PDF RILEVATO/I!")
+        for pdf_url, label in new_pdfs:
+            print(f"  -> {label}: {pdf_url}")
+            res = search_in_pdf(pdf_url, NOME_DA_CERCARE)
+            notify_new_pdf(label, pdf_url, res)
+            known_urls.add(pdf_url)
+
+        state["section_hash"] = section_hash
+        state["known_pdfs"]   = list(known_urls)
+        state["last_change"]  = time.strftime("%Y-%m-%d %H:%M:%S")
+        save_state(state)
+
+    elif section_hash != old_hash:
+        # La sezione è cambiata ma non ci sono nuovi PDF (es. testo modificato)
+        print("[!] Sezione aggiornata (nessun nuovo PDF).")
+        state["section_hash"] = section_hash
         save_state(state)
         send_telegram(
-            "🚨 <b>AGGIORNAMENTO GRADUATORIA UNINA!</b>\n\n"
-            "La pagina di enrollment della Developer Academy si è aggiornata!\n\n"
-            f"🔗 <a href=\"{URL_DA_MONITORARE}\">Apri la pagina</a>\n\n"
-            f"⏰ Rilevato alle: {time.strftime('%H:%M:%S del %d/%m/%Y')}"
+            f"🔔 <b>Aggiornamento sulla pagina UniNA</b>\n\n"
+            f"La sezione è cambiata ma non ci sono nuovi PDF.\n"
+            f"🔗 <a href=\"{URL_DA_MONITORARE}\">Controlla la pagina</a>\n"
+            f"⏰ {time.strftime('%H:%M del %d/%m/%Y')}"
         )
     else:
         print("[-] Nessuna modifica.")
-
-    save_state(state)
 
 
 def main():
@@ -241,25 +284,13 @@ def main():
     print("  Monitor Graduatoria Developer Academy UniNA")
     print("=" * 55)
 
-    # Controlla configurazione
-    if TELEGRAM_BOT_TOKEN == "QUI_IL_TUO_BOT_TOKEN":
-        print("\n[ERRORE] Apri monitor_unina.py e inserisci:")
-        print("  - TELEGRAM_BOT_TOKEN")
-        print("  - TELEGRAM_CHAT_ID")
-        print("\nCome ottenerli:")
-        print("  1. Scrivi a @BotFather su Telegram -> /newbot -> copia il token")
-        print("  2. Scrivi a @userinfobot su Telegram -> copia il tuo ID")
-        sys.exit(1)
-
-    # Modalità: loop continuo oppure singola esecuzione (per cron)
     if "--once" in sys.argv:
         check_once()
     else:
-        print(f"Intervallo: ogni {INTERVALLO_MINUTI} minuti")
-        print("Premi Ctrl+C per fermare.\n")
+        print("Avvio loop continuo. Premi Ctrl+C per fermare.\n")
         while True:
             check_once()
-            time.sleep(INTERVALLO_MINUTI * 60)
+            time.sleep(5 * 60)
 
 
 if __name__ == "__main__":

@@ -1,4 +1,14 @@
 {
-  "hash": "ea248b7c588bf6d4c62a0e9856f6ee98122d0104d91b2545715b57461bb113fd",
-  "first_seen": "2026-05-22 18:10:06"
+  "section_hash": "c1c414d5d42ce3bfb3e4abc084f39f3c8d00f7a01e24b2190330a67a9f67a2fa",
+  "known_pdfs": [
+    "https://www.developeracademy.unina.it/wp-content/uploads/call_26_27_devacademy_notadmittedtointerview.pdf",
+    "https://www.developeracademy.unina.it/wp-content/uploads/call_26_27_devacademy_interviewtimetable.pdf",
+    "https://www.developeracademy.unina.it/wp-content/uploads/call_26_27_devacademy_commission2.pdf",
+    "https://www.developeracademy.unina.it/wp-content/uploads/call_26_27_devacademy_admittedtointerview.pdf",
+    "https://www.developeracademy.unina.it/wp-content/uploads/call_26_27_devacademy_testtimetable_update1.pdf",
+    "https://www.developeracademy.unina.it/wp-content/uploads/call_26_27_devacademy_commission.pdf",
+    "https://www.developeracademy.unina.it/wp-content/uploads/call_26_27_devacademy_testtimetable.pdf",
+    "https://www.developeracademy.unina.it/wp-content/uploads/call_26_27_devacademy_admittedtotest.pdf"
+  ],
+  "first_seen": "2026-05-22 20:04:32"
 }
