@@ -1,9 +1,7 @@
 name: Monitor Graduatoria UniNA
 
 on:
-  schedule:
-    - cron: '*/5 * * * *'   # ogni 5 minuti
-  workflow_dispatch:          # esecuzione manuale dalla pagina GitHub
+  workflow_dispatch:
 
 concurrency:
   group: monitor-run
